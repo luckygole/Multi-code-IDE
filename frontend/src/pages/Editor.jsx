@@ -8,27 +8,17 @@ import * as monaco from "monaco-editor";
 import { useAuth } from "@clerk/clerk-react";
 import { motion } from "framer-motion";
 
-/**
- * Ultra-modern Gradient + Glass Hybrid Editor page
- * - Improved keyboard shortcut handling (Ctrl/Cmd+S)
- * - Fixed comment toggle (Ctrl/Cmd+/) using Monaco editor API
- * - Safer run filename construction
- * - Glass panels, subtle gradients, neat toolbar
- *
- * Note: relies on Tailwind classes available in your project.
- */
-
 const Editor = () => {
   const [code, setCode] = useState("");
   const [output, setOutput] = useState("");
   const [error, setError] = useState(false);
   const [data, setData] = useState(null);
   const [theme, setTheme] = useState("vs-dark");
+  const [isRunning, setIsRunning] = useState(false);
 
   const { id } = useParams();
   const { getToken } = useAuth();
 
-  // keep refs for monaco editor instance + monaco namespace
   const editorRef = useRef(null);
   const monacoRef = useRef(null);
 
@@ -110,12 +100,11 @@ const Editor = () => {
     }
   };
 
-  // ---------- Editor mount (store refs + define themes) ----------
+  // ---------- Editor mount ----------
   const handleEditorMount = (editor, monacoNS) => {
     editorRef.current = editor;
     monacoRef.current = monacoNS;
 
-    // define a small Dracula-like theme only once
     try {
       monacoNS.editor.defineTheme("dracula-custom", {
         base: "vs-dark",
@@ -138,7 +127,6 @@ const Editor = () => {
       console.error("Error defining custom theme:", err);
     }
 
-    // apply theme immediately
     try {
       monacoNS.editor.setTheme(theme);
     } catch (err) {
@@ -148,7 +136,6 @@ const Editor = () => {
 
   // reapply theme when changed
   useEffect(() => {
-    // prefer monaco instance if available
     try {
       if (monacoRef.current) monacoRef.current.editor.setTheme(theme);
       else if (window.monaco?.editor) window.monaco.editor.setTheme(theme);
@@ -157,17 +144,19 @@ const Editor = () => {
     }
   }, [theme]);
 
-  // ---------- Keyboard shortcuts (attach once) ----------
+  // ---------- Keyboard shortcuts ----------
+  const saveProjectRef = useRef(null);
+  useEffect(() => {
+    saveProjectRef.current = saveProject;
+  });
+
   useEffect(() => {
     const onKeyDown = (e) => {
-      // Save: Ctrl/Cmd + S
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
-        saveProject();
+        saveProjectRef.current && saveProjectRef.current();
         return;
       }
-
-      // Toggle comment: Ctrl/Cmd + /
       if ((e.ctrlKey || e.metaKey) && e.key === "/") {
         e.preventDefault();
         toggleComment();
@@ -177,27 +166,21 @@ const Editor = () => {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-    // attach once — no deps so it's stable
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- Toggle comment using Monaco API ----------
+  // ---------- Toggle comment ----------
   const toggleComment = () => {
     const editor = editorRef.current;
     const monacoNS = monacoRef.current || monaco;
-    if (!editor || !monacoNS) {
-      return;
-    }
+    if (!editor || !monacoNS) return;
 
     const model = editor.getModel();
     const selection = editor.getSelection();
-
     if (!model || !selection) return;
 
     const startLine = selection.startLineNumber;
     const endLine = selection.endLineNumber;
 
-    // Determine whether all selected lines are commented
     let allCommented = true;
     for (let line = startLine; line <= endLine; line++) {
       const txt = model.getLineContent(line).trim();
@@ -207,46 +190,22 @@ const Editor = () => {
       }
     }
 
-    // Build edits
     const edits = [];
     for (let line = startLine; line <= endLine; line++) {
-      const lineNumber = line;
-      const lineContent = model.getLineContent(lineNumber);
+      const lineContent = model.getLineContent(line);
 
       if (allCommented) {
-        // remove first occurrence of // with optional space
         const match = lineContent.match(/^(\s*)\/\/\s?(.*)$/);
         if (match) {
-          const leading = match[1];
-          const after = match[2] ?? "";
-          const range = new monacoNS.Range(
-            lineNumber,
-            1,
-            lineNumber,
-            lineContent.length + 1
-          );
-          edits.push({
-            range,
-            text: leading + after,
-            forceMoveMarkers: true,
-          });
+          const range = new monacoNS.Range(line, 1, line, lineContent.length + 1);
+          edits.push({ range, text: match[1] + (match[2] ?? ""), forceMoveMarkers: true });
         }
       } else {
-        // add // after leading whitespace
         const match = lineContent.match(/^(\s*)(.*)$/);
         const leading = match ? match[1] : "";
         const rest = match ? match[2] : lineContent;
-        const range = new monacoNS.Range(
-          lineNumber,
-          1,
-          lineNumber,
-          lineContent.length + 1
-        );
-        edits.push({
-          range,
-          text: `${leading}//${rest}`,
-          forceMoveMarkers: true,
-        });
+        const range = new monacoNS.Range(line, 1, line, lineContent.length + 1);
+        edits.push({ range, text: `${leading}//${rest}`, forceMoveMarkers: true });
       }
     }
 
@@ -254,76 +213,90 @@ const Editor = () => {
       editor.pushUndoStop();
       editor.executeEdits("toggle-comment", edits);
       editor.pushUndoStop();
-
-      // update React state from model after edits
-      const newCode = model.getValue();
-      setCode(newCode);
+      setCode(model.getValue());
     }
   };
 
-  // ---------- Run project (Piston) ----------
+  // ---------- Run project (Backend -> Glot.io, no CORS) ----------
   const runProject = async () => {
     if (!data) {
       toast.error("Project metadata not loaded yet.");
       return;
     }
 
-    // Build filename safely
-    const ext =
-      data.projLanguage === "python"
-        ? ".py"
-        : data.projLanguage === "java"
-        ? ".java"
-        : data.projLanguage === "javascript"
-        ? ".js"
-        : data.projLanguage === "c"
-        ? ".c"
-        : data.projLanguage === "cpp"
-        ? ".cpp"
-        : data.projLanguage === "bash"
-        ? ".sh"
-        : ".txt";
-
-    const filename = (data.name ?? "Main") + ext;
+    setIsRunning(true);
+    setOutput("");
+    setError(false);
 
     try {
-      const res = await fetch("https://emkc.org/api/v2/piston/execute", {
+      const token = await getToken({ template: "default" });
+
+      const res = await fetch(`${api_base_url}/runCode`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           language: data.projLanguage,
-          version: data.version,
-          files: [
-            {
-              filename,
-              content: code,
-            },
-          ],
+          code,
         }),
       });
 
-      const json = await res.json();
-      setOutput(json?.run?.output ?? JSON.stringify(json));
-      setError(Boolean(json?.run?.code && json.run.code !== 0));
+      const text = await res.text();
+      if (!text || text.trim() === "") {
+        setOutput("Error: Server returned empty response. Please try again.");
+        setError(true);
+        return;
+      }
+
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch (e) {
+        setOutput("Error: Could not parse server response.\n\n" + text);
+        setError(true);
+        return;
+      }
+
+      if (!json?.success) {
+        setOutput("Error: " + (json?.msg || "Failed to run code."));
+        setError(true);
+        return;
+      }
+
+      // Glot.io returns stdout, stderr, error fields inside json.data
+      const glot     = json.data;
+      const stdout   = glot?.stdout  ?? "";
+      const stderr   = glot?.stderr  ?? "";
+      const runError = glot?.error   ?? "";
+
+      const isError  = Boolean(stderr || runError);
+      const finalOut = isError
+        ? (stderr || runError)
+        : (stdout || "Program finished with no output.");
+
+      setOutput(finalOut);
+      setError(isError);
     } catch (err) {
       console.error("Run error:", err);
-      toast.error("Failed to run code.");
+      toast.error("Failed to run code. Check your internet connection.");
+      setOutput("Error: Could not connect to execution server.");
+      setError(true);
+    } finally {
+      setIsRunning(false);
     }
   };
 
-  // ---------- small UI helpers ----------
+  // ---------- Theme options ----------
   const themeOptions = [
-    { value: "vs-dark", label: "VS Dark" },
-    { value: "vs-light", label: "VS Light" },
-    { value: "hc-black", label: "High Contrast" },
-    { value: "dracula-custom", label: "Dracula" },
-    { value: "monokai", label: "Monokai" },
-    { value: "github-dark", label: "GitHub Dark" },
+    { value: "vs-dark",        label: "VS Dark"       },
+    { value: "vs-light",       label: "VS Light"      },
+    { value: "hc-black",       label: "High Contrast" },
+    { value: "dracula-custom", label: "Dracula"       },
   ];
 
-  // ---------- JSX (Glass + Gradient Hybrid) ----------
+  // ---------- JSX ----------
   return (
     <>
       <Navbar />
@@ -334,18 +307,12 @@ const Editor = () => {
         transition={{ duration: 0.4 }}
         className="min-h-[calc(100vh-70px)] w-full"
         style={{
-          // // gradient background
-          // background:
-          //   "linear-gradient(135deg, rgba(58,50,160,0.85) 0%, rgba(30,58,138,0.9) 45%, rgba(11,20,60,1) 100%)",
-
-          // black theme subtle gradient background
-              background: "linear-gradient(135deg, #1a1a1a 0%, #111111 50%, #0d0d0d 100%)"
+          background: "linear-gradient(135deg, #1a1a1a 0%, #111111 50%, #0d0d0d 100%)",
         }}
       >
-        {/* A centered content container with padding */}
         <div className="max-w-[1400px] mx-auto p-6">
 
-          {/* Top toolbar (glass) */}
+          {/* Top toolbar */}
           <div
             className="backdrop-blur-sm bg-white/6 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4"
             style={{ boxShadow: "0 6px 30px rgba(2,6,23,0.6)" }}
@@ -365,9 +332,7 @@ const Editor = () => {
 
             {/* Controls */}
             <div className="flex items-center gap-3">
-              <label className="text-sm text-white/80 mr-2 hidden md:inline">
-                Theme
-              </label>
+              <label className="text-sm text-white/80 mr-2 hidden md:inline">Theme</label>
               <select
                 value={theme}
                 onChange={(e) => setTheme(e.target.value)}
@@ -390,10 +355,21 @@ const Editor = () => {
 
               <button
                 onClick={runProject}
-                className="px-4 py-2 rounded-md bg-gradient-to-br from-indigo-500 to-blue-600 text-white shadow-md hover:brightness-105 transition"
+                disabled={isRunning}
+                className="px-4 py-2 rounded-md bg-gradient-to-br from-indigo-500 to-blue-600 text-white shadow-md hover:brightness-105 transition disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                 title="Run"
               >
-                Run
+                {isRunning ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    Running...
+                  </>
+                ) : (
+                  "Run"
+                )}
               </button>
             </div>
           </div>
@@ -401,7 +377,7 @@ const Editor = () => {
           {/* Main panels */}
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-            {/* Editor (glass card) */}
+            {/* Editor panel */}
             <div
               className="rounded-2xl overflow-hidden"
               style={{
@@ -418,7 +394,6 @@ const Editor = () => {
                   <div className="w-3 h-3 rounded-full bg-green-400" />
                   <span className="text-sm text-white/80 ml-3">Editor</span>
                 </div>
-
                 <div className="text-xs text-white/60">Ctrl/Cmd + / to toggle comments</div>
               </div>
 
@@ -427,7 +402,11 @@ const Editor = () => {
                   onMount={handleEditorMount}
                   theme={theme}
                   height="100%"
-                  language={data?.projLanguage || "javascript"}
+                  language={
+                    data?.projLanguage === "cpp"
+                      ? "cpp"
+                      : data?.projLanguage || "javascript"
+                  }
                   value={code}
                   onChange={(newCode) => setCode(newCode ?? "")}
                   options={{
@@ -441,7 +420,7 @@ const Editor = () => {
               </div>
             </div>
 
-            {/* Output panel (glass card) */}
+            {/* Output panel */}
             <div
               className="rounded-2xl p-4"
               style={{
@@ -456,7 +435,17 @@ const Editor = () => {
               <div className="flex items-center justify-between pb-3 border-b border-white/6 mb-3">
                 <div className="flex items-center gap-3">
                   <span className="text-sm text-white/80 font-medium">Output</span>
-                  <span className="text-xs text-white/50">{error ? "Error" : "Run result"}</span>
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-full ${
+                      error
+                        ? "bg-red-500/20 text-red-300"
+                        : output
+                        ? "bg-green-500/20 text-green-300"
+                        : "text-white/50"
+                    }`}
+                  >
+                    {isRunning ? "Running..." : error ? "Error" : output ? "Success" : "Idle"}
+                  </span>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -488,28 +477,49 @@ const Editor = () => {
                   border: "1px solid rgba(255,255,255,0.03)",
                 }}
               >
-                <pre
-                  className={`whitespace-pre-wrap text-sm font-mono ${
-                    error ? "text-rose-300" : "text-green-200"
-                  }`}
-                >
-                  {output ? output : "Run your code to see the result here..."}
-                </pre>
+                {isRunning ? (
+                  <div className="flex items-center gap-3 text-white/60 text-sm">
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    Running code...
+                  </div>
+                ) : (
+                  <pre
+                    className={`whitespace-pre-wrap text-sm font-mono ${
+                      error ? "text-rose-300" : "text-green-200"
+                    }`}
+                  >
+                    {output ? output : "Run your code to see the result here..."}
+                  </pre>
+                )}
               </div>
 
-              {/* metadata */}
-              <div className="mt-4 text-xs text-white/60">
+              {/* Metadata */}
+              <div className="mt-4 text-xs text-white/60 space-y-1">
                 <div>
                   Project: <span className="text-white/90">{data?.name ?? "—"}</span>
                 </div>
                 <div>
                   Language: <span className="text-white/90">{data?.projLanguage ?? "—"}</span>
                 </div>
+                <div>
+                  Powered by:{" "}
+                  <a
+                    href="https://glot.io"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-400 hover:underline"
+                  >
+                    Glot.io
+                  </a>
+                </div>
               </div>
             </div>
           </div>
 
-          {/* small footer note */}
+          {/* Footer tip */}
           <div className="mt-6 text-xs text-white/50 text-center">
             Tip: Use <span className="text-white/80">Ctrl/Cmd + S</span> to save,{" "}
             <span className="text-white/80">Ctrl/Cmd + /</span> to toggle comments.
@@ -521,5 +531,3 @@ const Editor = () => {
 };
 
 export default Editor;
-
-

@@ -1,6 +1,7 @@
 const projectModel = require("../models/projectModel");
 const { requireAuth } = require("@clerk/express");
 
+
 // 🧠 Helper: Get starter code for each language
  function getStartupCode(language) {
   if (language.toLowerCase() === "python") {
@@ -40,7 +41,8 @@ exports.createProj =
   async (req, res) => {
     try {
       const { name, projLanguage, version } = req.body;
-      const userId = req.auth.userId;
+            const { userId } = req.auth(); // ✅ correct new syntax
+
 
       if (!name || !projLanguage) {
         return res.status(400).json({ success: false, msg: "Missing required fields" });
@@ -94,7 +96,7 @@ exports.saveProject =
     } catch (error) {
       res.status(500).json({ success: false, msg: error.message });
     }
-  },
+  };
 
 
 // ✅ Get all projects of a logged-in user
@@ -107,7 +109,7 @@ exports.getProjects =
       return res.status(401).json({ success: false, msg: "Unauthorized user" });
     }
       const projects = await projectModel.find({ createdBy: userId }).sort({ createdAt: -1 });
-      console.log("Fetched for user:", req.auth.userId);
+      console.log("Fetched for user:", userId);
 
       res.status(200).json({
         success: true,
@@ -135,7 +137,8 @@ exports.getProject =
         return res.status(400).json({ success: false, msg: "Project ID required" });
       }
 
-      const project = await projectModel.findOne({ _id: projectId});
+      // const project = await projectModel.findOne({ _id: projectId});
+      const project = await projectModel.findOne({ _id: projectId, createdBy: userId });
 
       if (!project) {
         return res.status(404).json({ success: false, msg: "Project not found" });
@@ -203,3 +206,40 @@ exports.editProject =
       res.status(500).json({ success: false, msg: error.message });
     }
   };
+
+  exports.runCode = async (req, res) => {
+  try {
+    const { language, code } = req.body;
+
+    const filenameMap = {
+      python:     "main.py",
+      javascript: "main.js",
+      c:          "main.c",
+      cpp:        "main.cpp",
+      java:       "Main.java",
+      bash:       "main.sh",
+    };
+
+    const filename = filenameMap[language];
+    if (!filename) {
+      return res.status(400).json({ success: false, msg: "Unsupported language" });
+    }
+
+    const glotRes = await fetch(`https://glot.io/api/run/${language}/latest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" ,
+        "Authorization": `Token ${process.env.GLOT_TOKEN}`, 
+      },
+      
+      body: JSON.stringify({
+        files: [{ name: filename, content: code }],
+      }),
+    });
+
+    const data = await glotRes.json();
+    console.log("Glot response:", JSON.stringify(data));
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, msg: err.message });
+  }
+};
