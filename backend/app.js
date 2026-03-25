@@ -29,7 +29,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(cors({
   origin: [
     "http://localhost:5173",
-    "https://multi-code-ide-gray.vercel.app",
+    "https://multi-code-ide-pi.vercel.app",
   ],
   credentials: true,
 }));
