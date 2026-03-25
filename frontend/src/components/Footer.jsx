@@ -23,7 +23,7 @@ const Footer = () => {
 
         {/* Bottom Line */}
         <p className="text-xs text-gray-500 text-center">
-          © {new Date().getFullYear()} MultiCode-IDE — Made by bhumi
+          © {new Date().getFullYear()} MultiCode-IDE — Made by Lucky gole
         </p>
       </div>
     </footer>
